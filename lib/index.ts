@@ -10,7 +10,7 @@ import { decryptSTREAM, encryptSTREAM } from "./stream.js"
 
 export function generateIdentity(): Promise<string> {
   const scalar = randomBytes(32)
-  const identity = bech32.encode("AGE-SECRET-KEY-", bech32.toWords(scalar)).toUpperCase()
+  const identity = bech32.encode("AGE-SECRET-KEY-", bech32.toWords(scalar), false).toUpperCase()
   return Promise.resolve(identity)
 }
 
@@ -28,13 +28,23 @@ export async function identityToRecipient(identity: string | CryptoKey): Promise
   }
 
   const recipient = await x25519.scalarMultBase(scalar)
-  return bech32.encode("age", bech32.toWords(recipient))
+  return bech32.encode("age", bech32.toWords(recipient), false)
 }
+
+export type PluginRecipientV1 = (fileKey: Uint8Array, recipient: Uint8Array) => Promise<Stanza>
+export type PluginIdentityV1 = (stanza: Stanza, identity: Uint8Array) => Promise<Uint8Array | null>
+
+export { Stanza, x25519Wrap, x25519Unwrap }
 
 export class Encrypter {
   private passphrase: string | null = null
   private scryptWorkFactor = 18
-  private recipients: Uint8Array[] = []
+  private recipients: { type: string; data: Uint8Array }[] = []
+  private plugins: Record<string, PluginRecipientV1> = {}
+
+  registerPlugin(name: string, handler: PluginRecipientV1): void {
+    this.plugins[name] = handler
+  }
 
   setPassphrase(s: string): void {
     if (this.passphrase !== null)
@@ -52,11 +62,28 @@ export class Encrypter {
     if (this.passphrase !== null)
       throw new Error("can't encrypt to both recipients and passphrases")
     const res = bech32.decodeToBytes(s)
+
     if (!s.startsWith("age1") ||
-      res.prefix.toLowerCase() !== "age" ||
-      res.bytes.length !== 32)
+      !res.prefix.toLowerCase().startsWith("age") ||
+      (res.prefix.toLowerCase() === 'age' && res.bytes.length !== 32))
       throw Error("invalid recipient")
-    this.recipients.push(res.bytes)
+
+    if (res.prefix === 'age') {
+      this.recipients.push({
+        type: res.prefix,
+        data: res.bytes
+      })
+      return
+    }
+
+    const pluginName = res.prefix.replace(/^age1/, '')
+    if (!this.plugins[pluginName])
+      throw Error(`No plugin handler present for recipient of type ${pluginName}`)
+
+    this.recipients.push({
+      type: pluginName,
+      data: res.bytes
+    })
   }
 
   async encrypt(file: Uint8Array | string): Promise<Uint8Array> {
@@ -67,8 +94,12 @@ export class Encrypter {
     const fileKey = randomBytes(16)
     const stanzas: Stanza[] = []
 
-    for (const recipient of this.recipients) {
-      stanzas.push(await x25519Wrap(fileKey, recipient))
+    for (const { type, data } of this.recipients) {
+      if (type === 'age') {
+        stanzas.push(await x25519Wrap(fileKey, data))
+      } else {
+        stanzas.push(await this.plugins[type](fileKey, data))
+      }
     }
     if (this.passphrase !== null) {
       stanzas.push(scryptWrap(fileKey, this.passphrase, this.scryptWorkFactor))
@@ -93,6 +124,12 @@ export class Encrypter {
 export class Decrypter {
   private passphrases: string[] = []
   private identities: x25519Identity[] = []
+  private pluginIdentities: Record<string, Uint8Array[]> = {}
+  private plugins: Record<string, PluginIdentityV1> = {}
+
+  registerPlugin(name: string, handler: PluginIdentityV1): void {
+    this.plugins[name] = handler
+  }
 
   addPassphrase(s: string): void {
     this.passphrases.push(s)
@@ -107,10 +144,21 @@ export class Decrypter {
       return
     }
     const res = bech32.decodeToBytes(s)
+
+    if (res.prefix.startsWith("age-plugin-")) {
+      const pluginName = res.prefix.replace("age-plugin-", "").toLowerCase().slice(0, -1)
+      if (!this.pluginIdentities[pluginName]) {
+        this.pluginIdentities[pluginName] = []
+      }
+      this.pluginIdentities[pluginName].push(res.bytes)
+      return
+    }
+
     if (!s.startsWith("AGE-SECRET-KEY-1") ||
       res.prefix.toUpperCase() !== "AGE-SECRET-KEY-" ||
       res.bytes.length !== 32)
       throw Error("invalid identity")
+
     this.identities.push({
       identity: res.bytes,
       recipient: x25519.scalarMultBase(res.bytes),
@@ -159,7 +207,15 @@ export class Decrypter {
         const k = await x25519Unwrap(s, i)
         if (k !== null) { return k }
       }
+
+      if (this.pluginIdentities[s.args[0]]?.length && this.plugins[s.args[0]]) {
+        for (const i of this.pluginIdentities[s.args[0]]) {
+          const k = await this.plugins[s.args[0]](s, i)
+          if (k !== null) { return k }
+        }
+      }
     }
+
     return null
   }
 }
