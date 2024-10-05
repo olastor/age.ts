@@ -45,6 +45,8 @@ export class Encrypter {
         this.passphrase = null;
         this.scryptWorkFactor = 18;
         this.recipients = [];
+        this.pluginRecipients = {};
+        this.pluginIdentities = {};
         this.plugins = {};
     }
     registerPlugin(name, handler) {
@@ -60,6 +62,14 @@ export class Encrypter {
     setScryptWorkFactor(logN) {
         this.scryptWorkFactor = logN;
     }
+    addIdentity(s) {
+        // TODO: validation
+        const res = bech32.decodeToBytes(s.toLowerCase());
+        const pluginName = res.prefix.replace(/^age-plugin-/, '');
+        if (!this.plugins[pluginName])
+            throw Error(`No plugin handler present for identity of type ${pluginName}`);
+        this.pluginIdentities[pluginName].push(s);
+    }
     addRecipient(s) {
         if (this.passphrase !== null)
             throw new Error("can't encrypt to both recipients and passphrases");
@@ -69,19 +79,13 @@ export class Encrypter {
             (res.prefix.toLowerCase() === 'age' && res.bytes.length !== 32))
             throw Error("invalid recipient");
         if (res.prefix === 'age') {
-            this.recipients.push({
-                type: res.prefix,
-                data: res.bytes
-            });
+            this.recipients.push(res.bytes);
             return;
         }
         const pluginName = res.prefix.replace(/^age1/, '');
         if (!this.plugins[pluginName])
             throw Error(`No plugin handler present for recipient of type ${pluginName}`);
-        this.recipients.push({
-            type: pluginName,
-            data: res.bytes
-        });
+        this.pluginRecipients[pluginName].push(s);
     }
     encrypt(file) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -90,16 +94,16 @@ export class Encrypter {
             }
             const fileKey = randomBytes(16);
             const stanzas = [];
-            for (const { type, data } of this.recipients) {
-                if (type === 'age') {
-                    stanzas.push(yield x25519Wrap(fileKey, data));
-                }
-                else {
-                    stanzas.push(yield this.plugins[type](fileKey, data));
-                }
+            for (const data of this.recipients) {
+                stanzas.push(yield x25519Wrap(fileKey, data));
             }
             if (this.passphrase !== null) {
                 stanzas.push(scryptWrap(fileKey, this.passphrase, this.scryptWorkFactor));
+            }
+            const plugins = new Set([...Object.keys(this.pluginRecipients), ...Object.keys(this.pluginIdentities)]);
+            for (const pluginName of plugins) {
+                const pluginStanzas = yield this.plugins[pluginName](fileKey, this.pluginRecipients[pluginName], this.pluginIdentities[pluginName]);
+                stanzas.push(...pluginStanzas);
             }
             const hmacKey = hkdf(sha256, fileKey, undefined, "header", 32);
             const mac = hmac(sha256, hmacKey, encodeHeaderNoMAC(stanzas));
@@ -138,11 +142,11 @@ export class Decrypter {
         }
         const res = bech32.decodeToBytes(s);
         if (res.prefix.startsWith("age-plugin-")) {
-            const pluginName = res.prefix.replace("age-plugin-", "").toLowerCase().slice(0, -1);
+            const pluginName = res.prefix.toLowerCase().replace("age-plugin-", "").slice(0, -1);
             if (!this.pluginIdentities[pluginName]) {
                 this.pluginIdentities[pluginName] = [];
             }
-            this.pluginIdentities[pluginName].push(res.bytes);
+            this.pluginIdentities[pluginName].push(s);
             return;
         }
         if (!s.startsWith("AGE-SECRET-KEY-1") ||
