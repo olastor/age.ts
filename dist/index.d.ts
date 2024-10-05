@@ -2,20 +2,13 @@ import { x25519Unwrap, x25519Wrap } from "./recipients.js";
 import { Stanza } from "./format.js";
 export declare function generateIdentity(): Promise<string>;
 export declare function identityToRecipient(identity: string | CryptoKey): Promise<string>;
-export interface PluginRecipient {
-    wrapFileKey: (fileKey: Uint8Array) => Stanza | Promise<Stanza>;
-}
-export interface PluginIdentity {
-    unwrapFileKey: (stanzas: Stanza[]) => Uint8Array | Promise<Uint8Array | null> | null;
-}
-export type handleRecipientType = (recipientBytes: Uint8Array) => PluginRecipient;
-export type handleIdentityAsRecipientType = (identityBytes: Uint8Array) => PluginRecipient;
-export type handleIdentityType = (identityBytes: Uint8Array) => PluginIdentity;
-export interface Plugin {
+export interface Plugin<Recipient, Identity> {
     name: string;
-    handleRecipient: handleRecipientType;
-    handleIdentityAsRecipient: handleIdentityAsRecipientType;
-    handleIdentity: handleIdentityType;
+    handleRecipient: (recipientBytes: Uint8Array) => Recipient;
+    handleIdentityAsRecipient: (identityBytes: Uint8Array) => Recipient;
+    handleIdentity: (identityBytes: Uint8Array) => Identity;
+    wrapFileKey: (recipient: Recipient, fileKey: Uint8Array) => Stanza | Promise<Stanza>;
+    unwrapFileKey: (identity: Identity, stanzas: Stanza[]) => Uint8Array | Promise<Uint8Array | null> | null;
 }
 export { Stanza, x25519Wrap, x25519Unwrap };
 export declare class Encrypter {
@@ -24,7 +17,7 @@ export declare class Encrypter {
     private recipients;
     private pluginRecipients;
     private plugins;
-    registerPlugin(plugin: Plugin): void;
+    registerPlugin(plugin: Plugin<any, any>): void;
     setPassphrase(s: string): void;
     setScryptWorkFactor(logN: number): void;
     addIdentity(s: string): void;
@@ -36,7 +29,7 @@ export declare class Decrypter {
     private identities;
     private pluginIdentities;
     private plugins;
-    registerPlugin(name: string, plugin: Plugin): void;
+    registerPlugin(name: string, plugin: Plugin<any, any>): void;
     addPassphrase(s: string): void;
     addIdentity(s: string | CryptoKey): void;
     decrypt(file: Uint8Array, outputFormat?: "uint8array"): Promise<Uint8Array>;

@@ -31,23 +31,13 @@ export async function identityToRecipient(identity: string | CryptoKey): Promise
   return bech32.encode("age", bech32.toWords(recipient), false)
 }
 
-export interface PluginRecipient {
-  wrapFileKey: (fileKey: Uint8Array) => Stanza | Promise<Stanza>
-}
-
-export interface PluginIdentity {
-  unwrapFileKey: (stanzas: Stanza[]) => Uint8Array | Promise<Uint8Array | null> | null
-}
-
-export type handleRecipientType = (recipientBytes: Uint8Array) => PluginRecipient
-export type handleIdentityAsRecipientType = (identityBytes: Uint8Array) => PluginRecipient
-export type handleIdentityType = (identityBytes: Uint8Array) => PluginIdentity
-
-export interface Plugin {
+export interface Plugin<Recipient, Identity> {
   name: string
-  handleRecipient: handleRecipientType
-  handleIdentityAsRecipient: handleIdentityAsRecipientType
-  handleIdentity: handleIdentityType
+  handleRecipient: (recipientBytes: Uint8Array) => Recipient
+  handleIdentityAsRecipient: (identityBytes: Uint8Array) => Recipient
+  handleIdentity: (identityBytes: Uint8Array) => Identity
+  wrapFileKey: (recipient: Recipient, fileKey: Uint8Array) => Stanza | Promise<Stanza>
+  unwrapFileKey: (identity: Identity, stanzas: Stanza[]) => Uint8Array | Promise<Uint8Array | null> | null
 }
 
 export { Stanza, x25519Wrap, x25519Unwrap }
@@ -57,10 +47,10 @@ export class Encrypter {
   private scryptWorkFactor = 18
   private recipients: Uint8Array[] = []
 
-  private pluginRecipients: PluginRecipient[] = []
-  private plugins: Record<string, Plugin> = {}
+  private pluginRecipients: Record<string, any[]> = {}
+  private plugins: Record<string, Plugin<any, any>> = {}
 
-  registerPlugin(plugin: Plugin): void {
+  registerPlugin(plugin: Plugin<any, any>): void {
     this.plugins[plugin.name] = plugin
   }
 
@@ -82,7 +72,9 @@ export class Encrypter {
     const pluginName = res.prefix.replace(/^age-plugin-/, '')
     if (!this.plugins[pluginName])
       throw Error(`No plugin handler present for identity of type ${pluginName}`)
-    this.pluginRecipients.push(this.plugins[pluginName].handleIdentityAsRecipient(res.bytes))
+
+    if (!this.pluginRecipients[pluginName]) this.pluginRecipients[pluginName] = []
+    this.pluginRecipients[pluginName].push(this.plugins[pluginName].handleIdentityAsRecipient(res.bytes))
   }
 
   addRecipient(s: string): void {
@@ -104,7 +96,8 @@ export class Encrypter {
     if (!this.plugins[pluginName])
       throw Error(`No plugin handler present for recipient of type ${pluginName}`)
 
-    this.pluginRecipients.push(this.plugins[pluginName].handleRecipient(res.bytes))
+    if (!this.pluginRecipients[pluginName]) this.pluginRecipients[pluginName] = []
+    this.pluginRecipients[pluginName].push(this.plugins[pluginName].handleRecipient(res.bytes))
   }
 
   async encrypt(file: Uint8Array | string): Promise<Uint8Array> {
@@ -122,8 +115,10 @@ export class Encrypter {
       stanzas.push(scryptWrap(fileKey, this.passphrase, this.scryptWorkFactor))
     }
 
-    for (const pluginRecipient of this.pluginRecipients) {
-      stanzas.push(await pluginRecipient.wrapFileKey(fileKey))
+    for (const [name, recs] of Object.entries(this.pluginRecipients)) {
+      for (const r of recs) {
+        stanzas.push(await this.plugins[name].wrapFileKey(r, fileKey))
+      }
     }
 
     const hmacKey = hkdf(sha256, fileKey, undefined, "header", 32)
@@ -145,10 +140,10 @@ export class Encrypter {
 export class Decrypter {
   private passphrases: string[] = []
   private identities: x25519Identity[] = []
-  private pluginIdentities: PluginIdentity[] = []
-  private plugins: Record<string, Plugin> = {}
+  private pluginIdentities: Record<string, any[]> = {}
+  private plugins: Record<string, Plugin<any,any>> = {}
 
-  registerPlugin(name: string, plugin: Plugin): void {
+  registerPlugin(name: string, plugin: Plugin<any,any>): void {
     this.plugins[name] = plugin
   }
 
@@ -168,7 +163,8 @@ export class Decrypter {
 
     if (res.prefix.startsWith("age-plugin-")) {
       const pluginName = res.prefix.toLowerCase().replace("age-plugin-", "").slice(0, -1)
-      this.pluginIdentities.push(this.plugins[pluginName].handleIdentity(res.bytes))
+      if (!this.pluginIdentities[pluginName]) this.pluginIdentities[pluginName] = []
+      this.pluginIdentities[pluginName].push(this.plugins[pluginName].handleIdentity(res.bytes))
       return
     }
 
@@ -227,9 +223,11 @@ export class Decrypter {
       }
     }
 
-    for (const pluginIdentity of this.pluginIdentities) {
-      const k = await pluginIdentity.unwrapFileKey(recipients)
-      if (k !== null) return k
+    for (const [name, ids] of Object.entries(this.pluginIdentities)) {
+      for (const i of ids) {
+        const k = await this.plugins[name].unwrapFileKey(i, recipients)
+        if (k !== null) return k
+      }
     }
 
     return null

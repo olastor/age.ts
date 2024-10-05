@@ -45,7 +45,7 @@ export class Encrypter {
         this.passphrase = null;
         this.scryptWorkFactor = 18;
         this.recipients = [];
-        this.pluginRecipients = [];
+        this.pluginRecipients = {};
         this.plugins = {};
     }
     registerPlugin(plugin) {
@@ -67,7 +67,9 @@ export class Encrypter {
         const pluginName = res.prefix.replace(/^age-plugin-/, '');
         if (!this.plugins[pluginName])
             throw Error(`No plugin handler present for identity of type ${pluginName}`);
-        this.pluginRecipients.push(this.plugins[pluginName].handleIdentityAsRecipient(res.bytes));
+        if (!this.pluginRecipients[pluginName])
+            this.pluginRecipients[pluginName] = [];
+        this.pluginRecipients[pluginName].push(this.plugins[pluginName].handleIdentityAsRecipient(res.bytes));
     }
     addRecipient(s) {
         if (this.passphrase !== null)
@@ -84,7 +86,9 @@ export class Encrypter {
         const pluginName = res.prefix.replace(/^age1/, '');
         if (!this.plugins[pluginName])
             throw Error(`No plugin handler present for recipient of type ${pluginName}`);
-        this.pluginRecipients.push(this.plugins[pluginName].handleRecipient(res.bytes));
+        if (!this.pluginRecipients[pluginName])
+            this.pluginRecipients[pluginName] = [];
+        this.pluginRecipients[pluginName].push(this.plugins[pluginName].handleRecipient(res.bytes));
     }
     encrypt(file) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -99,8 +103,10 @@ export class Encrypter {
             if (this.passphrase !== null) {
                 stanzas.push(scryptWrap(fileKey, this.passphrase, this.scryptWorkFactor));
             }
-            for (const pluginRecipient of this.pluginRecipients) {
-                stanzas.push(yield pluginRecipient.wrapFileKey(fileKey));
+            for (const [name, recs] of Object.entries(this.pluginRecipients)) {
+                for (const r of recs) {
+                    stanzas.push(yield this.plugins[name].wrapFileKey(r, fileKey));
+                }
             }
             const hmacKey = hkdf(sha256, fileKey, undefined, "header", 32);
             const mac = hmac(sha256, hmacKey, encodeHeaderNoMAC(stanzas));
@@ -120,7 +126,7 @@ export class Decrypter {
     constructor() {
         this.passphrases = [];
         this.identities = [];
-        this.pluginIdentities = [];
+        this.pluginIdentities = {};
         this.plugins = {};
     }
     registerPlugin(name, plugin) {
@@ -140,7 +146,9 @@ export class Decrypter {
         const res = bech32.decodeToBytes(s);
         if (res.prefix.startsWith("age-plugin-")) {
             const pluginName = res.prefix.toLowerCase().replace("age-plugin-", "").slice(0, -1);
-            this.pluginIdentities.push(this.plugins[pluginName].handleIdentity(res.bytes));
+            if (!this.pluginIdentities[pluginName])
+                this.pluginIdentities[pluginName] = [];
+            this.pluginIdentities[pluginName].push(this.plugins[pluginName].handleIdentity(res.bytes));
             return;
         }
         if (!s.startsWith("AGE-SECRET-KEY-1") ||
@@ -195,10 +203,12 @@ export class Decrypter {
                     }
                 }
             }
-            for (const pluginIdentity of this.pluginIdentities) {
-                const k = yield pluginIdentity.unwrapFileKey(recipients);
-                if (k !== null)
-                    return k;
+            for (const [name, ids] of Object.entries(this.pluginIdentities)) {
+                for (const i of ids) {
+                    const k = yield this.plugins[name].unwrapFileKey(i, recipients);
+                    if (k !== null)
+                        return k;
+                }
             }
             return null;
         });
