@@ -45,12 +45,11 @@ export class Encrypter {
         this.passphrase = null;
         this.scryptWorkFactor = 18;
         this.recipients = [];
-        this.pluginRecipients = {};
-        this.pluginIdentities = {};
+        this.pluginRecipients = [];
         this.plugins = {};
     }
-    registerPlugin(name, handler) {
-        this.plugins[name] = handler;
+    registerPlugin(plugin) {
+        this.plugins[plugin.name] = plugin;
     }
     setPassphrase(s) {
         if (this.passphrase !== null)
@@ -68,7 +67,7 @@ export class Encrypter {
         const pluginName = res.prefix.replace(/^age-plugin-/, '');
         if (!this.plugins[pluginName])
             throw Error(`No plugin handler present for identity of type ${pluginName}`);
-        this.pluginIdentities[pluginName].push(s);
+        this.pluginRecipients.push(this.plugins[pluginName].handleIdentityAsRecipient(res.bytes));
     }
     addRecipient(s) {
         if (this.passphrase !== null)
@@ -85,7 +84,7 @@ export class Encrypter {
         const pluginName = res.prefix.replace(/^age1/, '');
         if (!this.plugins[pluginName])
             throw Error(`No plugin handler present for recipient of type ${pluginName}`);
-        this.pluginRecipients[pluginName].push(s);
+        this.pluginRecipients.push(this.plugins[pluginName].handleRecipient(res.bytes));
     }
     encrypt(file) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -100,10 +99,8 @@ export class Encrypter {
             if (this.passphrase !== null) {
                 stanzas.push(scryptWrap(fileKey, this.passphrase, this.scryptWorkFactor));
             }
-            const plugins = new Set([...Object.keys(this.pluginRecipients), ...Object.keys(this.pluginIdentities)]);
-            for (const pluginName of plugins) {
-                const pluginStanzas = yield this.plugins[pluginName](fileKey, this.pluginRecipients[pluginName], this.pluginIdentities[pluginName]);
-                stanzas.push(...pluginStanzas);
+            for (const pluginRecipient of this.pluginRecipients) {
+                stanzas.push(yield pluginRecipient.wrapFileKey(fileKey));
             }
             const hmacKey = hkdf(sha256, fileKey, undefined, "header", 32);
             const mac = hmac(sha256, hmacKey, encodeHeaderNoMAC(stanzas));
@@ -123,11 +120,11 @@ export class Decrypter {
     constructor() {
         this.passphrases = [];
         this.identities = [];
-        this.pluginIdentities = {};
+        this.pluginIdentities = [];
         this.plugins = {};
     }
-    registerPlugin(name, handler) {
-        this.plugins[name] = handler;
+    registerPlugin(name, plugin) {
+        this.plugins[name] = plugin;
     }
     addPassphrase(s) {
         this.passphrases.push(s);
@@ -143,10 +140,7 @@ export class Decrypter {
         const res = bech32.decodeToBytes(s);
         if (res.prefix.startsWith("age-plugin-")) {
             const pluginName = res.prefix.toLowerCase().replace("age-plugin-", "").slice(0, -1);
-            if (!this.pluginIdentities[pluginName]) {
-                this.pluginIdentities[pluginName] = [];
-            }
-            this.pluginIdentities[pluginName].push(s);
+            this.pluginIdentities.push(this.plugins[pluginName].handleIdentity(res.bytes));
             return;
         }
         if (!s.startsWith("AGE-SECRET-KEY-1") ||
@@ -181,7 +175,6 @@ export class Decrypter {
     }
     unwrapFileKey(recipients) {
         return __awaiter(this, void 0, void 0, function* () {
-            var _a;
             for (const s of recipients) {
                 // Ideally this should be implemented by passing all stanzas to the scrypt
                 // identity implementation, and letting it throw the error. In practice,
@@ -201,14 +194,11 @@ export class Decrypter {
                         return k;
                     }
                 }
-                if (((_a = this.pluginIdentities[s.args[0]]) === null || _a === void 0 ? void 0 : _a.length) && this.plugins[s.args[0]]) {
-                    for (const i of this.pluginIdentities[s.args[0]]) {
-                        const k = yield this.plugins[s.args[0]](s, i);
-                        if (k !== null) {
-                            return k;
-                        }
-                    }
-                }
+            }
+            for (const pluginIdentity of this.pluginIdentities) {
+                const k = yield pluginIdentity.unwrapFileKey(recipients);
+                if (k !== null)
+                    return k;
             }
             return null;
         });
