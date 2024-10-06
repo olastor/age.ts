@@ -143,8 +143,8 @@ export class Decrypter {
   private pluginIdentities: Record<string, any[]> = {}
   private plugins: Record<string, Plugin<any,any>> = {}
 
-  registerPlugin(name: string, plugin: Plugin<any,any>): void {
-    this.plugins[name] = plugin
+  registerPlugin(plugin: Plugin<any,any>): void {
+    this.plugins[plugin.name] = plugin
   }
 
   addPassphrase(s: string): void {

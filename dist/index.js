@@ -129,8 +129,8 @@ export class Decrypter {
         this.pluginIdentities = {};
         this.plugins = {};
     }
-    registerPlugin(name, plugin) {
-        this.plugins[name] = plugin;
+    registerPlugin(plugin) {
+        this.plugins[plugin.name] = plugin;
     }
     addPassphrase(s) {
         this.passphrases.push(s);

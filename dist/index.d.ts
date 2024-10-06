@@ -29,7 +29,7 @@ export declare class Decrypter {
     private identities;
     private pluginIdentities;
     private plugins;
-    registerPlugin(name: string, plugin: Plugin<any, any>): void;
+    registerPlugin(plugin: Plugin<any, any>): void;
     addPassphrase(s: string): void;
     addIdentity(s: string | CryptoKey): void;
     decrypt(file: Uint8Array, outputFormat?: "uint8array"): Promise<Uint8Array>;
