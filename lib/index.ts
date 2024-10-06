@@ -69,7 +69,7 @@ export class Encrypter {
   addIdentity(s: string): void {
     // TODO: validation
     const res = bech32.decodeToBytes(s.toLowerCase())
-    const pluginName = res.prefix.replace(/^age-plugin-/, '')
+    const pluginName = res.prefix.replace(/^age-plugin-/, '').slice(0, -1)
     if (!this.plugins[pluginName])
       throw Error(`No plugin handler present for identity of type ${pluginName}`)
 
