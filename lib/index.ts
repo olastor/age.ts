@@ -10,7 +10,7 @@ import { decryptSTREAM, encryptSTREAM } from "./stream.js"
 
 export function generateIdentity(): Promise<string> {
   const scalar = randomBytes(32)
-  const identity = bech32.encode("AGE-SECRET-KEY-", bech32.toWords(scalar)).toUpperCase()
+  const identity = bech32.encode("AGE-SECRET-KEY-", bech32.toWords(scalar), false).toUpperCase()
   return Promise.resolve(identity)
 }
 
@@ -28,13 +28,31 @@ export async function identityToRecipient(identity: string | CryptoKey): Promise
   }
 
   const recipient = await x25519.scalarMultBase(scalar)
-  return bech32.encode("age", bech32.toWords(recipient))
+  return bech32.encode("age", bech32.toWords(recipient), false)
 }
+
+export interface Plugin<Recipient, Identity> {
+  name: string
+  handleRecipient: (recipientBytes: Uint8Array) => Recipient
+  handleIdentityAsRecipient: (identityBytes: Uint8Array) => Recipient
+  handleIdentity: (identityBytes: Uint8Array) => Identity
+  wrapFileKey: (recipient: Recipient, fileKey: Uint8Array) => Stanza | Promise<Stanza>
+  unwrapFileKey: (identity: Identity, stanzas: Stanza[]) => Uint8Array | Promise<Uint8Array | null> | null
+}
+
+export { Stanza, x25519Wrap, x25519Unwrap }
 
 export class Encrypter {
   private passphrase: string | null = null
   private scryptWorkFactor = 18
   private recipients: Uint8Array[] = []
+
+  private pluginRecipients: Record<string, any[]> = {}
+  private plugins: Record<string, Plugin<any, any>> = {}
+
+  registerPlugin(plugin: Plugin<any, any>): void {
+    this.plugins[plugin.name] = plugin
+  }
 
   setPassphrase(s: string): void {
     if (this.passphrase !== null)
@@ -48,15 +66,38 @@ export class Encrypter {
     this.scryptWorkFactor = logN
   }
 
+  addIdentity(s: string): void {
+    // TODO: validation
+    const res = bech32.decodeToBytes(s.toLowerCase())
+    const pluginName = res.prefix.replace(/^age-plugin-/, '').slice(0, -1)
+    if (!this.plugins[pluginName])
+      throw Error(`No plugin handler present for identity of type ${pluginName}`)
+
+    if (!this.pluginRecipients[pluginName]) this.pluginRecipients[pluginName] = []
+    this.pluginRecipients[pluginName].push(this.plugins[pluginName].handleIdentityAsRecipient(res.bytes))
+  }
+
   addRecipient(s: string): void {
     if (this.passphrase !== null)
       throw new Error("can't encrypt to both recipients and passphrases")
     const res = bech32.decodeToBytes(s)
+
     if (!s.startsWith("age1") ||
-      res.prefix.toLowerCase() !== "age" ||
-      res.bytes.length !== 32)
+      !res.prefix.toLowerCase().startsWith("age") ||
+      (res.prefix.toLowerCase() === 'age' && res.bytes.length !== 32))
       throw Error("invalid recipient")
-    this.recipients.push(res.bytes)
+
+    if (res.prefix === 'age') {
+      this.recipients.push(res.bytes)
+      return
+    }
+
+    const pluginName = res.prefix.replace(/^age1/, '')
+    if (!this.plugins[pluginName])
+      throw Error(`No plugin handler present for recipient of type ${pluginName}`)
+
+    if (!this.pluginRecipients[pluginName]) this.pluginRecipients[pluginName] = []
+    this.pluginRecipients[pluginName].push(this.plugins[pluginName].handleRecipient(res.bytes))
   }
 
   async encrypt(file: Uint8Array | string): Promise<Uint8Array> {
@@ -67,11 +108,17 @@ export class Encrypter {
     const fileKey = randomBytes(16)
     const stanzas: Stanza[] = []
 
-    for (const recipient of this.recipients) {
-      stanzas.push(await x25519Wrap(fileKey, recipient))
+    for (const data of this.recipients) {
+      stanzas.push(await x25519Wrap(fileKey, data))
     }
     if (this.passphrase !== null) {
       stanzas.push(scryptWrap(fileKey, this.passphrase, this.scryptWorkFactor))
+    }
+
+    for (const [name, recs] of Object.entries(this.pluginRecipients)) {
+      for (const r of recs) {
+        stanzas.push(await this.plugins[name].wrapFileKey(r, fileKey))
+      }
     }
 
     const hmacKey = hkdf(sha256, fileKey, undefined, "header", 32)
@@ -93,6 +140,12 @@ export class Encrypter {
 export class Decrypter {
   private passphrases: string[] = []
   private identities: x25519Identity[] = []
+  private pluginIdentities: Record<string, any[]> = {}
+  private plugins: Record<string, Plugin<any,any>> = {}
+
+  registerPlugin(plugin: Plugin<any,any>): void {
+    this.plugins[plugin.name] = plugin
+  }
 
   addPassphrase(s: string): void {
     this.passphrases.push(s)
@@ -107,10 +160,19 @@ export class Decrypter {
       return
     }
     const res = bech32.decodeToBytes(s)
+
+    if (res.prefix.startsWith("age-plugin-")) {
+      const pluginName = res.prefix.toLowerCase().replace("age-plugin-", "").slice(0, -1)
+      if (!this.pluginIdentities[pluginName]) this.pluginIdentities[pluginName] = []
+      this.pluginIdentities[pluginName].push(this.plugins[pluginName].handleIdentity(res.bytes))
+      return
+    }
+
     if (!s.startsWith("AGE-SECRET-KEY-1") ||
       res.prefix.toUpperCase() !== "AGE-SECRET-KEY-" ||
       res.bytes.length !== 32)
       throw Error("invalid identity")
+
     this.identities.push({
       identity: res.bytes,
       recipient: x25519.scalarMultBase(res.bytes),
@@ -160,6 +222,14 @@ export class Decrypter {
         if (k !== null) { return k }
       }
     }
+
+    for (const [name, ids] of Object.entries(this.pluginIdentities)) {
+      for (const i of ids) {
+        const k = await this.plugins[name].unwrapFileKey(i, recipients)
+        if (k !== null) return k
+      }
+    }
+
     return null
   }
 }
